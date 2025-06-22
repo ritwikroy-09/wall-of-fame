@@ -1,129 +1,97 @@
-import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
-import { jwtVerify } from "jose";
-import { SECRET_KEY as ENV_SECRET_KEY } from "./app/secrets";
+import { NextRequest, NextResponse } from 'next/server';
+import { jwtVerify } from 'jose';
+import { SECRET_KEY as ENV_SECRET_KEY } from './app/secrets';
 
 const SECRET_KEY = new TextEncoder().encode(ENV_SECRET_KEY);
 
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
-  let token = req.nextUrl.searchParams.get("token"); // Get token from URL
+  const token = req.cookies.get('token')?.value;
 
-  if (pathname === "/") {
-    console.log("Homepage accessed. No authentication required.");
+  // Pages that require authentication
+  const protectedRoutes = ['/submit', '/dashboard', '/admin'];
+
+  // Redirect helper
+  const redirectToUnauthorized = (msg: string) => {
+    const url = new URL('/unauthorized', req.url);
+    url.searchParams.set('message', msg);
+    url.searchParams.set('callbackUrl', req.nextUrl.pathname);
+    return NextResponse.redirect(url);
+  };
+
+  // Allow public pages
+  if (!protectedRoutes.includes(pathname)) {
     return NextResponse.next();
   }
 
-  const redirectToUnauthorized = (msg: string) => {
-    const url = new URL("/unauthorized", req.url);
-    url.searchParams.set("message", msg);
-    url.searchParams.set("callbackUrl", req.nextUrl.pathname);
-    console.log(`Redirecting to /unauthorized with message: ${msg}`);
-    return NextResponse.redirect(url);
-  };
-  
-  var email;
-  if (['/submit', '/dashboard', '/admin'].includes(pathname)) {
-    if (!token) {
-      console.log("No token found. Redirecting to /unauthorized.");
-      return redirectToUnauthorized("No token found.");
-    }
-    try {
-      token = decodeURIComponent(token); // Decode in case it's URL-encoded
-      const { payload } = await jwtVerify(token, SECRET_KEY);
-      email = String(payload.email || "").trim();
-      if (!email || !email.includes("@")) {
-        console.log("Invalid email format in token. Redirecting to /unauthorized.");
-        return redirectToUnauthorized("Invalid email format in token.");
-      }
-      const domain = email.split("@")[1];
-      console.log(`Token Verified Successfully: Logged-in Email: ${email}`);
-    } catch (error) {
-      console.log("Invalid Token! Redirecting to /unauthorized.", error);
-      return redirectToUnauthorized("Invalid token.");
-    }
-  }
-  if (pathname === "/submit" || pathname === "/dashboard") {
-    try {
-
-      if (!email || !email.includes("@")) {
-        console.log("Invalid email format in token. Redirecting to /unauthorized.");
-        return redirectToUnauthorized("Invalid email format in token.");
-      }
-
-      const domain = email.split("@")[1];
-      console.log(`Extracted mail: ${email}`);
-      if (pathname === "/dashboard" && domain !== "gmail.com") {
-        console.log("Unauthorized access attempt to dashboard. Redirecting.");
-        return redirectToUnauthorized("Unauthorized access to dashboard.");
-      }
-
-      if (pathname === "/submit" && domain !== "muj.manipal.edu") {
-        console.log("Unauthorized access attempt to submit page. Redirecting.");
-        return redirectToUnauthorized("Unauthorized access to submit page.");
-      }
-
-      console.log(`Token Verified Successfully! Logged-in Email: ${email}`);
-      console.log(`Extracted Domain: ${domain}`);
-
-      return NextResponse.next(); // Allow access
-    } catch (error) {
-      console.log("Invalid Token! Redirecting to /unauthorized.", error);
-      return redirectToUnauthorized("Invalid token.");
-    }
+  // Reject if no token
+  if (!token) {
+    return redirectToUnauthorized('No token found.');
   }
 
-  if (pathname === "/admin") {
-    try {
-      const checkAdminStatus = async (email: string) => {
-        try {
-          const baseUrl = new URL(req.url).origin;
-          const response = await fetch(`${baseUrl}/api/auth/check-admin`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: email })
-          });
-          const data = await response.json();
-          return data.isAdmin;
-        } catch (error) {
-          console.error('Failed to check admin status:', error);
-          return false;
-        }
-      };
+  try {
+    const { payload } = await jwtVerify(token, SECRET_KEY);
+    const email = String(payload.email || '').trim();
 
-      if (!email || !email.includes("@")) {
-        console.log("Invalid email format in token. Redirecting to /unauthorized.");
-        return redirectToUnauthorized("Invalid email format in token.");
+    if (!email.includes('@')) {
+      return redirectToUnauthorized('Invalid token.');
+    }
+
+    const domain = email.split('@')[1];
+    const username = email.split('@')[0];
+
+    if (pathname === '/dashboard') {
+      if (domain !== 'gmail.com') {
+        return redirectToUnauthorized('Only Gmail users allowed on dashboard.');
       }
-      const user = email.split("@")[0];
-      const domain = email.split("@")[1];
-      
-      if (domain !== "gmail.com" && domain !== "muj.manipal.edu") {
-        console.log("Unauthorized access attempt to admin page. Redirecting.");
-        return redirectToUnauthorized("Unauthorized access to admin page.");
+    }
+
+    if (pathname === '/submit') {
+      if (domain !== 'muj.manipal.edu') {
+        return redirectToUnauthorized('Only MUJ students allowed to submit.');
       }
-      
-      const isAdmin = await checkAdminStatus(email);
+    }
+
+    if (pathname === '/admin') {
+      if (!['gmail.com', 'muj.manipal.edu'].includes(domain)) {
+        return redirectToUnauthorized('Access restricted.');
+      }
+
+      const isAdmin = await checkAdminStatus(email, req);
       if (!isAdmin) {
-        console.log("Unauthorized access attempt to admin page. Redirecting.");
-        return redirectToUnauthorized("User not authorized for admin access.");
+        return redirectToUnauthorized('You are not an admin.');
       }
-
-      console.log(`Token Verified Successfully! Logged-in Email: ${email}`);
-      console.log(`Extracted Domain: ${domain}`);
-
-      return NextResponse.next(); // Allow access
-    } catch (error) {
-      console.log("Invalid Token! Redirecting to /unauthorized.", error);
-      return redirectToUnauthorized("Invalid token.");
     }
-  }
 
-  return NextResponse.next(); // Allow access to all other routes
+    // Everything passed
+    return NextResponse.next();
+
+  } catch (err) {
+    console.error('Token verification failed:', err);
+    return redirectToUnauthorized('Invalid or expired token.');
+  }
 }
 
+// Helper to call internal /api/auth/check-admin
+async function checkAdminStatus(email: string, req: NextRequest): Promise<boolean> {
+  try {
+    const baseUrl = new URL(req.url).origin;
+    const response = await fetch(`${baseUrl}/api/auth/check-admin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email })
+    });
+    const data = await response.json();
+    return data.isAdmin === true;
+  } catch (error) {
+    console.error('Admin check failed:', error);
+    return false;
+  }
+}
+
+// Match all except static assets
 export const config = {
   matcher: [
-    "/((?!unauthorized|_next/static|_next/image|favicon.ico).*)", // Protect all pages, including domain-a-page and domain-b-page
+    '/((?!_next/static|_next/image|favicon.ico|unauthorized).*)',
   ],
 };
