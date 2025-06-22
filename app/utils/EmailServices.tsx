@@ -41,7 +41,7 @@ interface OTPDocument {
 export class EmailService {
   static async sendEmail(email: string, subject: string, html: string): Promise<void> {
     const shit = await transporter.sendMail({
-      from: 'ritwikroy2002@gmail.com',
+      from: EMAIL_USER,
       to: email,
       subject,
       html
